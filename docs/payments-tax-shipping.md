@@ -1,137 +1,127 @@
 # Payments, tax, and shipping (CFLLC / SpockShop.com)
 
-Website checkout is a CFLLC sale. Marketplace checkouts are *those* platforms’ sales. Books need both, separately.
+Website checkout is a CFLLC sale. Marketplace checkouts are those platforms’ sales. Books need both, separately.
+
+**Locked location (2026-09-07)**
+
+- Inventory / home office / pickup counter: **Bentonville, Arkansas**
+- Local pickup: **enabled**
+- Nexus v1: **Arkansas only**
+- Pickup ZIPs to treat as Bentonville: **72712, 72716**
+
+Reference combined Bentonville rate used for v1 pickup (verify against DFA before go-live): Arkansas 6.5% + Benton County 1% + Bentonville 2% = **9.5%**. Other AR cities differ (Rogers can be 10%, Centerton 9.75%, etc.).
+
+This is software configuration, not tax advice. Confirm the permit and sourcing rules with a CPA / Arkansas DFA.
 
 ---
 
 ## 1. Cards — Stripe
 
-Use **Stripe Checkout** (hosted page) first, not a custom card form.
+Use **Stripe Checkout** first (hosted page, no raw card data on the mini PC).
 
-Why:
+1. Customer chooses **Ship** or **Pickup in Bentonville**.
+2. If ship: enter address. If pickup: no shipping charge; tax uses Bentonville 9.5%.
+3. Server quotes shipping + tax from server prices.
+4. Stripe Checkout Session for `subtotal + shipping + tax`.
+5. Webhook `checkout.session.completed` marks paid, decrements inventory, writes `sales`.
 
-- PCI stays on Stripe
-- Works from a home mini PC as long as HTTPS and webhooks reach the box (Cloudflare Tunnel)
-- No monthly Stripe fee on standard pricing; you pay when a charge succeeds
-- Payouts go to the CFLLC Stripe account (same EIN / bank as the LLC)
-
-Flow:
-
-1. Customer enters shipping address on SpockShop.com.
-2. Server quotes shipping + sales tax from **server prices**, not the browser.
-3. Server creates a Stripe Checkout Session for `subtotal + shipping + tax`.
-4. Webhook `checkout.session.completed` marks the order paid, decrements inventory, writes the `sales` row.
-
-Store on the order: `stripe_session_id`, `payment_intent_id`, amount breakdown.
-
-Do not put card numbers on the mini PC.
+Payouts: CFLLC Stripe account.
 
 ---
 
-## 2. Crypto — BTCPay Server on the same mini PC
+## 2. Crypto — BTCPay on the mini PC
 
-Do **not** add Coinbase Commerce, BitPay, or another hosted crypto company if the goal is fewer vendors. **BTCPay Server** is open source and runs in Docker next to the shop.
-
-- Customer picks “Pay with crypto.”
-- Shop creates a BTCPay invoice for the same total (subtotal + shipping + tax) in USD, payable in BTC (and Lightning if you enable it).
-- BTCPay webhook marks the order paid the same way Stripe does.
-- You withdraw from *your* wallet. No extra processor cut beyond miner / Lightning fees.
-
-Caveats to accept up front:
-
-- Crypto is volatile; invoice should be short-lived (15–60 minutes).
-- Treat crypto receipts as CFLLC income at the USD invoice amount.
-- You still owe sales tax on the taxable amount even if the customer paid in BTC.
-- Start with Bitcoin only. More coins = more wallet ops, not more sales.
+Same total as Stripe. BTC (Lightning optional). USD invoice amount is CFLLC income. Sales tax is still owed on the taxable USD amount. Short invoice window (15–60 minutes).
 
 ---
 
-## 3. Sales tax — CFLLC books
+## 3. Sales tax v1 — Arkansas nexus only
 
-Tax is a **liability**, not profit. Checkout must show it, collect it on website orders, and store a snapshot so a CPA can file.
+Tax is a liability, not profit.
 
-### What to collect on every website order
+### Snapshot stored on every website order
 
-- Ship-to street, city, state, ZIP, country
-- Taxable subtotal (item price; usually shipping *is* taxable in some states — store both flags)
-- Jurisdiction: state (+ county/city later if volume requires)
-- Rate used and amount collected
-- `tax_exempt` flag (almost never for retail resale to consumers)
+- Fulfillment: `pickup_bentonville` or `ship`
+- Ship-to street, city, state, ZIP, country (or pickup flag)
+- Taxable goods, shipping charged, whether shipping was taxed
+- Rate, jurisdiction label, tax amount
+- `tax_reason`: `pickup_origin` | `ar_destination` | `no_nexus`
 
-### Nexus (you must confirm with your CPA)
+### Rules
 
-Likely starting point: **origin/nexus in the state(s) where CFLLC has a real presence** (home office / inventory storage). Destination rates apply for many states once you have nexus there.
+| Situation | Tax |
+|-----------|-----|
+| Pickup in Bentonville | Bentonville combined rate (v1 default **9.5%**) |
+| Ship to another Arkansas city | Arkansas destination local rate for that city/ZIP (not Bentonville’s rate) |
+| Ship outside Arkansas | **$0** tax, `tax_reason = no_nexus` until CFLLC has nexus elsewhere |
 
-Do not guess nexus from this doc. For software:
+v1 implementation can start with:
 
-**v1 (cheap, honest):**
+- Pickup → 9.5%
+- Ship to AR → lookup table of common NWA cities + fallback **7.5%** (state 6.5% + Benton County-style 1% minimum) until a ZIP file is loaded
+- Ship out of state → $0
 
-- Configurable nexus states in admin (start with the CFLLC home state).
-- For ship-to addresses **in a nexus state**, apply that state’s combined rate table (state + a default local average, or ZIP rate file).
-- For ship-to addresses **outside nexus**, charge `$0` tax and record `tax_reason = no_nexus`.
-- Local pickup: origin-state rate.
+Arkansas generally taxes the goods. Confirm whether your shipping charge is taxable; store `shipping_taxable` so the CPA is not guessing.
 
-**v1.1 if orders spread across many states:**
+### Later
 
-- Stripe Tax is the least-work option (Stripe already in the stack). It is a paid calculation add-on. Use it only when a ZIP-rate file becomes painful.
-- Avoid a third tax SaaS (TaxJar / Avalara) until filing complexity requires it.
+If you ship a lot of in-state orders to many cities, load the official AR DFA local-rate file or turn on Stripe Tax. Do not add TaxJar/Avalara until filing pain requires it.
 
-### Resale nuance
+### Marketplaces
 
-You already paid sales tax or used a resale certificate when *buying* inventory. That does not remove tax when *selling* to a consumer on SpockShop.com. Marketplace facilitated sales (eBay, Depop, etc.) are often collected by the platform — record “tax remitted by platform” so you do not double-pay.
+eBay / Depop / Facebook often collect and remit tax themselves. Log `tax_remitted_by_platform` so CFLLC does not pay it twice.
 
-Admin sales log columns:
+Buying inventory with a resale certificate does **not** remove tax when selling to a consumer on SpockShop.com.
+
+### Sales log (CFLLC)
 
 - `channel`
 - `sold_price`
 - `tax_collected` (website)
-- `tax_remitted_by_platform` (eBay/Depop/etc.)
+- `tax_remitted_by_platform`
 - `platform_fees`
 - `shipping_charged` / `shipping_cost`
 - `purchase_cost`
-- `net_to_cfllc`
+- `net_to_cfllc` = sold_price − purchase_cost − platform_fees − shipping_cost  
+  (do not subtract collected tax as if it were expense; it is money you will remit)
 
 ---
 
-## 4. Shipping quotes
+## 4. Shipping + pickup
 
-Products already have `weightLb` and `dimensions`. Use them.
+Products already have `weightLb` and dimensions.
 
-**v1 (no extra company):**
+**v1**
 
-- Admin sets a few rules: e.g. under 1 lb = $6, 1–5 lb = $12, 5–15 lb = $18, oversized = “request quote.”
-- Free-shipping threshold optional (e.g. $75).
-- Local pickup = $0 shipping, origin tax.
-
-**v1.1:** USPS Retail Ground / Priority via a free or low-cost rate source if the flat table is leaving money on the table. EasyPost/Shippo are extra companies — skip until volume hurts.
+- **Pickup — Bentonville:** $0 shipping, “Ready for pickup” email, hold for a set number of days
+- **Ship:** flat table from weight, e.g. ≤1 lb $6, 1–5 lb $12, 5–15 lb $18, heavier = request quote
+- Optional free-ship threshold later
 
 Checkout order:
 
-1. Cart line items (server-verified price + qty)
-2. Shipping method (pickup vs ship)
-3. Address
+1. Verify line items on the server
+2. Pickup vs ship
+3. Address if shipping
 4. Shipping amount
-5. Tax on (goods [+ shipping if required])
+5. Tax
 6. Grand total → Stripe or BTCPay
 
-Never trust a total the browser submits.
+Never trust a browser-submitted total.
 
 ---
 
-## 5. Website order statuses
+## 5. Order statuses
 
-`pending_payment` → `paid` → `packed` → `shipped` → `completed`  
+`pending_payment` → `paid` → `packed` → `shipped` or `ready_for_pickup` → `completed` / `picked_up`  
 Also: `cancelled`, `refunded`
 
-Paid is only set from Stripe or BTCPay webhooks, not from the thank-you page.
+Paid only from Stripe or BTCPay webhooks.
 
 ---
 
-## 6. What CFLLC still handles outside the app
+## 6. Outside the app
 
-- Stripe account legal name / EIN / bank = CFLLC
-- Sales-tax permit(s) in nexus state(s)
-- Quarterly/annual sales-tax return using the order export
-- 1099-K / Stripe payouts vs marketplace 1099s — do not commingle in one “sales” number without `channel`
-
-The shop software stores the numbers. It does not file the return.
+- Stripe legal entity / EIN / bank = CFLLC
+- Arkansas sales-tax permit before collecting tax
+- File AR sales tax from the order export
+- Keep website Stripe payouts separate from eBay/Depop 1099s by `channel`
